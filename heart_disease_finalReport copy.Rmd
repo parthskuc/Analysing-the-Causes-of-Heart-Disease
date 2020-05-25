@@ -1,0 +1,1764 @@
+---
+title: "Analysing the Causes of Heart Disease"
+author: "Tanu Seth | Vidhi Rathod | Shrey Parth | Nikita Sankhe"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document: 
+    theme: journal
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+# Heart Disease prediction 
+
+Analysing Prediction power of different Machine learning algorithms on Heart disease data
+
+
+**About the data**
+The dataset used in this article is the Cleveland Heart Disease dataset taken from the UCI repository(http://archive.ics.uci.edu/ml/datasets/Heart+Disease). It originally contains 76 variables, but all published experiments refer to using 14 of them. The dataset consists of 303 observations. There are 14 columns in the dataset, which are described as follows:
+* Age: Age of the individual.
+* Sex: Gender of the individual: 1 = male, 0 = female
+* Chest-pain type (cp): 1 = asymptotic, 2 = atypical angina, 3 = non anginal pain
+* Resting Blood Pressure (trestbps): The resting blood pressure value in mmHg (unit)
+* Serum Cholesterol (chol): The serum cholesterol in mg/dl (unit)
+* Fasting Blood Sugar (fbs): The fasting blood sugar value of an individual, if > 120 -> 1, else 0
+* Resting ECG (restecg): displays resting electrocardiographic results
+* Max heart rate (thalach): The max heart rate achieved by an individual.
+* Exercise induced angina (exang): 1 = yes, 0 = no
+* Oldpeak: ST depression induced by exercise relative to rest
+* Slope: The slope of peak exercise ST segment
+* Ca: Number of major vessels (0-3) colored by fluoroscopy 
+* Thal: Thalassemia = 0,1,2,3
+* Heart_disease: Whether the individual is suffering from heart disease or not 0 = absence, 1= present.
+
+
+## 1.0 Loading Libraries
+
+```{r include=FALSE}
+
+library(tidyverse)
+library(dplyr)
+library(ROCR)
+library(caret)
+library(gbm)
+library(corrplot)
+library(rpart)
+library(glmnet)
+library(Hmisc)
+library(funModeling)
+library(pROC)
+library(randomForest)
+library(scales)
+library(cluster)
+library(DataExplorer)
+library(GGally)
+library(vtable)
+library(ggthemes)
+library(rpart)
+library(rpart.plot)
+library(DataExplorer)
+library(corrplot)
+library(ggcorrplot)
+library(kableExtra)
+#pca
+library(dummies)
+##eNSEMBLE
+library(gbm)
+library(mgcv)
+library(randomForest)
+library(ROCR)
+library(ipred)
+library('adabag')
+##ANN
+library(e1071)
+library(nnet)
+library(NeuralNetTools)
+
+#unsupervised
+library(ClustOfVar)
+library(cluster)    # clustering algorithms
+library(factoextra) # clustering visualization
+library(dendextend) # for comparing two dendrograms
+library(arules)#run summary report
+library(arulesViz)
+library(fpc)
+library(gridExtra)
+
+```
+
+## 1.1 Reading the data
+
+```{r}
+data_orig <- read.csv('heartdisease.csv')
+
+str(data_orig)
+head(data_orig)
+```
+`Sample of 5 rows shown above`
+
+## 2.0 Data Preperation
+
+## 2.1 Data scrubbing
+
+### 2.1.1 Scrubbing Function
+
+Function to convert the class of variables:
+
+```{r}
+convert_class <- function(obj,types){
+    for (i in 1:length(obj)){
+        FUN <- switch(types[i],character = as.character, 
+                                   numeric = as.numeric, 
+                                   factor = as.factor)
+        obj[,i] <- FUN(obj[,i])
+    }
+    obj
+}
+```
+
+```{r}
+data_orig<-rename(data_orig,heart_disease='target',age="age")
+
+data_orig <- data_orig %>% rename() %>%
+  mutate(sex = if_else(sex == 1, "male", "female"),
+         fbs = if_else(fbs == 1, ">120", "<=120"),
+         exang = if_else(exang == 1, "yes" ,"no"),
+         cp = if_else(cp == 1, "atypical angina",
+                      if_else(cp == 2, "non-anginal pain", "asymptotic")),
+         restecg = if_else(restecg == 0, "normal",
+                           if_else(restecg == 1, "abnormal", "definite")))
+
+change_class <-c("numeric","factor","factor","numeric","numeric","factor","factor","numeric","factor","numeric","factor","factor","factor","numeric")
+
+data_orig <- convert_class(data_orig,change_class)
+
+label <- data.frame(
+  age = "age in years",
+  sex = "sex of the patient",
+  cp = "chest pain type",
+  trestbps = "resting blood pressure (in mm Hg on admission to the hospital)",
+  chol = "serum cholestoral in mg/dl",
+  fbs = "fasting blood sugar > 120 mg/dl",
+  restecg = "resting electrocardiographic results",
+  thalach = "maximum heart rate achieved",
+  exang = "exercise induced angina",
+  oldpeak = "ST depression induced by exercise relative to rest, a measure of abnormality in electrocardiograms",
+  slope = "the slope of the peak exercise ST segment",
+  ca = "number of major vessels (0-3) colored by flourosopy",
+  thal = "3 = normal; 6 = fixed defect; 7 = reversable defect"
+)
+
+
+vtable::vtable(data_orig, labels = label, factor.limit = 0)
+
+```
+
+## 3.0 Data quality Check
+
+```{r}
+metadata<-t(introduce(data_orig))
+colnames(metadata)<-"Values"
+metadata
+plot_intro(data_orig)
+```
+
+**Plot the missing values **
+```{r}
+plot_missing(data_orig)
+
+```
+* There are no missing values
+
+## 4.0 Train test split
+
+Splitting the data in 70:30 ratio
+
+```{r}
+set.seed(13263635)
+
+train_percent <-0.70
+index <- sample(nrow(data_orig),nrow(data_orig)*train_percent)
+data <- data_orig[index,]
+data_test <- data_orig[-index,]
+
+```
+
+**Summarizing the Training data**
+
+```{r}
+summary(data)
+```
+
+## 5.0 Exploratory Data Analysis
+
+**Chi-Square Test of Independence for categorical columns**
+```{r}
+#fetch numeric columns
+catcols<-select_if(data, is.factor)
+numcols<-select_if(data, is.numeric)
+
+predictors<-catcols[,1:8]
+response<-numcols$heart_disease
+
+n<-ncol(predictors)
+values<- vector(mode="numeric", length=n)
+pvalues<- vector(mode="numeric", length=n)
+name.pred<-vector(mode="character", length=n)
+
+
+for(i in 1:ncol(predictors))
+{
+table(predictors[,i],response)
+c<-chisq.test(predictors[,i],response)
+
+pvalues[i]<-c$p.value
+values[i]<-ifelse(round(pvalues[i],3)<0.05,1,0)
+}
+
+result<-data.frame(cbind(colnames(predictors),ifelse(round(pvalues,4)<0.001,"<0.001",round(pvalues,4)),values))
+colnames(result)<-c("predictors","pvalues","Relationship")
+
+result
+
+```
+
+**Interpretation**
+Except *fasting blood sugar* all predictors(categorical) variables seems to be related to Response.
+
+**Correlation plot of numeric columns**
+```{r}
+
+#fetch numeric columns
+numcols<-select_if(data_orig, is.numeric)
+
+cor_heart <- cor(numcols)
+cor_heart
+#corr plot it
+corrplot(cor_heart, method = "ellipse", type="upper",)
+#another
+ggcorrplot(cor_heart,lab = T)
+```
+
+**Interpretation**
+
+thalach: maximum heart rate achieved
+oldpeak: ST depression induced by exercise relative to rest, a measure of abnormality in electrocardiograms
+
+seems to be correlated with response variable...
+However , thalach & oldpeak also show case substantial correlation amongst themselves.
+
+chol & age are also somewhat correlated
+trestbps(resting blood pressure) & age  also have substantial corelation.
+
+All these correlation amongst predictors are somewhat smaller in magnitude. Therefore as of now we need not remove them from analysis.
+
+```{r}
+present <- round((sum(as.numeric(data$heart_disease))*100)/nrow(data),2)
+absent<- round((100 - present),2)
+
+pie(table(data$heart_disease), col=c('green','red'),labels = c(paste(as.character(absent),'heart disease absent %'),paste(as.character(present), 'heart disease present %')),main = 'Distribution of heart disease status as percentage')
+```
+
+```{r}
+levels(data$heart_disease) = c("No disease","Disease")
+levels(data$sex) = c("female","male","")
+mosaicplot(data$sex ~ data$heart_disease,
+           main="Disease by Gender", shade=FALSE,color=TRUE,
+           xlab="Gender", ylab="Heart disease")
+```
+```{r}
+boxplot(data$age ~ data$heart_disease,
+        main="Disease by Age",
+         ylab="Age",xlab="Heart disease")
+
+head(data)
+```
+
+
+```{r fig.height = 15, fig.width = 10}
+num_features <- select_if(data, is.numeric) %>%  names()
+
+data %>% 
+  dplyr::select(heart_disease, one_of(num_features))  %>%
+  mutate(heart_disease=as.factor(heart_disease))%>%
+  gather(key = key, value = value,-heart_disease)%>%
+  ggplot(aes(x = value, fill = as.factor(heart_disease)))+
+  geom_histogram(alpha = 0.7)+
+  theme_stata()+
+  facet_wrap(~ key, scales = 'free',ncol = 2,nrow = 4)+
+  scale_fill_tableau()
+```
+
+```{r}
+
+ggplot(data, aes(cp, fill = as.factor(heart_disease)))+
+  geom_bar(position = "fill")+
+  ggtitle("cp")
+
+```
+
+```{r}
+data %>%
+  ggplot(aes(x=sex,y=trestbps))+
+  geom_boxplot(fill="darkorange")+
+  xlab("Sex")+
+  ylab("BP")+
+  facet_grid(~cp)
+```
+
+## 6.0 Supervised Learning
+
+### 6.1 Logistic Regression
+
+```{r}
+# Creating full(including all varibales) and null(intercept only) models for d_1
+logit_full = glm(heart_disease~., data = data, family = binomial)
+logit_null = glm(heart_disease~1, data = data, family = binomial)
+
+
+# Forward selection procedure
+forward = step(logit_null, scope = list(lower = logit_null, upper = logit_full), direction = "forward")
+
+
+# Backward selection procedure
+backward = step(logit_full, scope = list(lower = logit_null, upper = logit_full), direction = "backward")
+
+
+# Both 
+both = step(logit_full, scope = list(lower = logit_null, upper = logit_full), direction = "both")
+
+
+forward$formula
+```
+
+Logistic model
+```{r}
+logistic_model = glm(forward$formula, data=data, family = binomial)
+summary(logistic_model)
+```
+```{r}
+backward$formula
+```
+
+
+```{r}
+both$formula
+```
+
+
+**Symmetric Cost Logistic Regression**
+
+```{r}
+# predicting on train set
+predict_logit_train <- predict(logistic_model, type="response")
+
+
+costfunc = function(obs, pred.p,pcut){
+  weight1 = 1   # define the weight for "true=1 but pred=0" (FN)
+  weight0 = 1    # define the weight for "true=0 but pred=1" (FP)
+  c1 = (obs==1)&(pred.p<pcut)    # count for "true=1 but pred=0"   (FN)
+  c0 = (obs==0)&(pred.p>=pcut)   # count for "true=0 but pred=1"   (FP)
+  cost = mean(weight1*c1 + weight0*c0)  # misclassification with weight
+  return(cost) # you have to return to a value when you write R functions
+} 
+
+# define a sequence from 0.01 to 1 by 0.01
+p.seq = seq(0.01, 1, 0.01) 
+
+
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+  cost[i] = costfunc(obs = data$heart_disease, pred.p = predict_logit_train, pcut = p.seq[i])  
+} # end of the loop
+
+optimal.pcut.sym = p.seq[which(cost==min(cost))][1]
+
+optimal.pcut.sym  ##0.42
+```
+```{r}
+plot(p.seq, cost)
+```
+```{r}
+#predict the response
+pred_train <- predict(logistic_model, type = "response")
+#convert to binary based on optimal pcut for sym
+pred.train.sym <- as.numeric(pred_train > optimal.pcut.sym)
+
+confusion_matrix_train_sym <- table(data$heart_disease, pred.train.sym,dnn =c('true','predicted'))
+confusion_matrix_train_sym
+
+```
+
+
+```{r}
+misclassification_rate_train_sym <- round((confusion_matrix_train_sym[2]+confusion_matrix_train_sym[3])/sum(confusion_matrix_train_sym), 2)
+cat("train misclassfication rate:", misclassification_rate_train_sym)
+
+```
+```{r}
+#Symmetric cost evaluation function 
+cost0 <- function(r, pi){
+  weight1 = 1
+  weight0 = 1
+  c1 = (r==1)&(pi==0) #logical vector - true if actual 1 but predict 0
+  c0 = (r==0)&(pi==1) #logical vector - true if actual 0 but predict 1
+  return(mean(weight1*c1+weight0*c0))
+}
+
+#Aymmetric cost evaluation function 
+cost1 <- function(r, pi){
+  weight1 = 5
+  weight0 = 1
+  c1 = (r==1)&(pi==0) #logical vector - true if actual 1 but predict 0
+  c0 = (r==0)&(pi==1) #logical vector - true if actual 0 but predict 1
+  return(mean(weight1*c1+weight0*c0))
+}
+```
+
+**In sample- symmetric**
+
+```{r}
+#LOSS
+LOSS=(insamplecost0<-cost0(data$heart_disease,pred.train.sym))
+#Misclassification rate
+MCR=(insampleMCR0<-mean(data$heart_disease!=pred.train.sym))
+
+#Roc curve | AUC 
+pred <- prediction(as.numeric(pred_train),as.numeric(data$heart_disease))
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+rslt_sym_in<-c(LOSS,MCR,AUC)
+rslt_sym_in
+
+```
+
+**Optimal pcut - Assymetric Cost Logistic Regression**
+
+```{r}
+
+costfuncasym = function(obs, pred.p,pcut){
+  weight1 = 5   # define the weight for "true=1 but pred=0" (FN)
+  weight0 = 1    # define the weight for "true=0 but pred=1" (FP)
+  c1 = (obs==1)&(pred.p<pcut)    # count for "true=1 but pred=0"   (FN)
+  c0 = (obs==0)&(pred.p>=pcut)   # count for "true=0 but pred=1"   (FP)
+  cost = mean(weight1*c1 + weight0*c0)  # misclassification with weight
+  return(cost) # you have to return to a value when you write R functions
+} # end of the function
+
+p.seq = seq(0.01, 1, 0.01) 
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+  cost[i] = costfuncasym(obs = data$heart_disease, pred.p = predict_logit_train, pcut = p.seq[i])  
+} # end of the loop
+
+optimal.pcut.asym = p.seq[which(cost==min(cost))][1]
+
+optimal.pcut.asym #0.2
+```
+```{r}
+plot(p.seq, cost)
+```
+```{r}
+pred_train <- predict(logistic_model, type = "response")
+pred.train.asym <- as.numeric(pred_train > optimal.pcut.asym)
+
+
+confusion_matrix_train_asym <- table(data$heart_disease, pred.train.asym, dnn =c('true','predicted'))
+confusion_matrix_train_asym
+```
+
+
+```{r}
+misclassification_rate_train_asym <- round((confusion_matrix_train_asym[2]+confusion_matrix_train_asym[3])/sum(confusion_matrix_train_asym), 2)
+cat("train Asymmetric misclassfication rate:", misclassification_rate_train_asym)
+```
+
+**In sample - asymmetric**
+```{r}
+#LOSS
+LOSS=(insamplecost1<-cost1(data$heart_disease,pred.train.asym))
+#Misclassification rate
+MCR=(insampleMCR1<-mean(data$heart_disease!=pred.train.asym))
+
+#Roc curve | AUC 
+pred <- prediction(as.numeric(pred_train),as.numeric(data$heart_disease))
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+rslt_asym_in<-c(LOSS,MCR,AUC)
+rslt_asym_in
+```
+
+**Out sample - symmetric**
+
+```{r}
+
+#predict the response
+pred_test <- predict(logistic_model,newdata=data_test, type = "response")
+#convert to binary based on optimal pcut for sym
+pred.test.sym <- as.numeric(pred_test > optimal.pcut.sym)
+#LOSS
+LOSS=(outsamplecost0<-cost0(data_test$heart_disease,pred.test.sym))
+#Misclassification rate
+MCR=(outsampleMCR0<-mean(data_test$heart_disease!=pred.test.sym))
+
+#Roc curve | AUC 
+pred <- prediction(as.numeric(pred_test),as.numeric(data_test$heart_disease))
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+rslt_sym_out<-c(LOSS,MCR,AUC)
+rslt_sym_out
+
+```
+
+**Out sample - asymmetric**
+
+```{r}
+
+#convert to binary based on optimal pcut for sym
+pred.test.asym <- as.numeric(pred_test > optimal.pcut.asym)
+#LOSS
+LOSS=(outsamplecost1<-cost1(data_test$heart_disease,pred.test.asym))
+#Misclassification rate
+MCR=(outsampleMCR1<-mean(data_test$heart_disease!=pred.test.asym))
+
+#Roc curve | AUC 
+pred <- prediction(as.numeric(pred_test),as.numeric(data_test$heart_disease))
+perf.l<- performance(pred, "tpr", "fpr")
+plot(perf.l, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+rslt_asym_out<-c(LOSS,MCR,AUC)
+rslt_asym_out
+```
+
+
+
+```{r}
+eval<-data.frame(rbind(rslt_sym_in,rslt_sym_out,rslt_asym_in,rslt_asym_out),
+                 row.names=c('Logistic - Symmetric cost : in_sample',
+                             'Logistic - Symmetric cost : out_sample',
+                             'Logistic - Asymmetric cost: in_sample',
+                             'Logistic - Asymmetric cost : out_sample'))
+colnames(eval) <- c("COST", "MCR","AUC")
+
+
+
+kable(eval)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+```
+
+
+
+### 6.2 Decision Trees
+
+CART stands for classification and regression tree.
+
+From the **training Model** we have learnt through grid search that optimum pcut value for 
+* Symmetric misclassfication rate: 0.42
+* Asymmetric misclassfication rate: 0.20
+
+`We will be using the same for further analysis`
+
+`Here we make the assumption that false negative cost 5 times of false positive. In real life the cost structure should be carefully researched.`
+```{r}
+#data$heart_disease<-as.factor(data$heart_disease)
+#symmetric cost
+hrtDS.rpart0 <- rpart(formula = heart_disease ~ ., data = data, method = "class")
+#asymmetric cost
+hrtDS.rpart1 <- rpart(formula = heart_disease ~ . , data = data, method = "class", parms = list(loss=matrix(c(0,5,1,0), nrow = 2)))
+```
+*Symmetric Cost*
+```{r}
+pred0<- predict(hrtDS.rpart0, type="class")
+table(data$heart_disease, pred0, dnn = c("True", "Pred"))
+```
+False negatives are heavy costing so lets, add more penality of 5:1
+
+*Asymmetric Cost*
+**insample**
+```{r}
+pred1<- predict(hrtDS.rpart1, type="class")
+table(data$heart_disease, pred1, dnn = c("True", "Pred"))
+```
+As expected our False negatives have reduced to a substantial number but False positives have increased.
+
+Lets evaluate the performance of both these models, keeping in mid that FN are far more harzardous than FP 
+
+
+*Evaluation Function*
+```{r}
+
+#Symmetric cost evaluation function 
+cost0 <- function(r, pi){
+  weight1 = 1
+  weight0 = 1
+  c1 = (r==1)&(pi==0) #logical vector - true if actual 1 but predict 0
+  c0 = (r==0)&(pi==1) #logical vector - true if actual 0 but predict 1
+  return(mean(weight1*c1+weight0*c0))
+}
+
+#Aymmetric cost evaluation function 
+cost1 <- function(r, pi){
+  weight1 = 5
+  weight0 = 1
+  c1 = (r==1)&(pi==0) #logical vector - true if actual 1 but predict 0
+  c0 = (r==0)&(pi==1) #logical vector - true if actual 0 but predict 1
+  return(mean(weight1*c1+weight0*c0))
+}
+```
+
+**Symmetric Evaluation**
+Here we try to calculate the criterians **Missclassification rate | LOSS | AUC ** for Symmetric cost
+
+```{r}
+data$heart_disease<-as.factor(data$heart_disease)
+
+#LOSS
+LOSS=(insamplecost0<-cost1(data$heart_disease,pred0))
+#Misclassification rate
+MCR=(insampleMCR0<-mean(data$heart_disease!=pred0))
+
+#Roc curve | AUC 
+pred0_roc<- predict(hrtDS.rpart0, type="prob")[,2]
+pred <- prediction(pred0_roc,data[,14])
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+rslt_sym<-c(LOSS,MCR,AUC)
+rslt_sym
+```
+
+**Asymmetric Evaluation**
+
+Here we try tocalculate the criterians **Missclassification rate | LOSS | AUC ** for Asymmetric cost
+
+```{r}
+#LOSS
+LOSS=(insamplecost.df<-cost1(data$heart_disease,pred1))
+#Misclassification rate
+MCR=(insampleMCR.df<-mean(data$heart_disease!=pred1))
+
+#roc curve | AUC
+pred1_roc<- predict(hrtDS.rpart1, type="prob")[,2]
+pred <- prediction(pred1_roc,as.numeric(data$heart_disease))
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+rslt_Asym<-c(LOSS,MCR,AUC)
+rslt_Asym
+```
+**Summary table**
+```{r}
+eval<-data.frame(rbind(rslt_sym,rslt_Asym),
+                 row.names=c('Symmetric cost','Asymmetric cost'))
+colnames(eval) <- c("COST", "MCR","AUC")
+
+
+
+kable(eval)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+
+```
+Conclusion: **ASY wins **
+
+#### 6.2.1 Classification Tree
+
+The ideal way of creating a binary tree is to construct a large tree and then prune it to an optimum level
+```{r}
+
+hrtDS.rpart_prune <- rpart(formula = heart_disease ~ . , 
+                           data = data, method = "class", 
+                           parms = list(loss=matrix(c(0,5,1,0), nrow = 2)),
+                           cp = 0.001)
+
+```
+We have a bushy tree, Now we can try to prune up to a optimum level using plotcp function
+```{r}
+prp(hrtDS.rpart_prune)
+```
+```{r}
+plotcp(hrtDS.rpart_prune)
+```
+```{r}
+printcp(hrtDS.rpart_prune)
+```
+xerror gives you the cross-validation (default is 10-fold) error. You can see that the rel error (in-sample error) is always decreasing as model is more complex, while the cross-validation error (measure of performance on future observations) is not. That is why we prune the tree to avoid overfitting the training data.
+```{r}
+hrtDS.rpart_prune1<-prune(hrtDS.rpart_prune, cp = 0.0086)
+```
+#### 6.2.2  Model Assessment
+
+**Insample Prediction**
+```{r}
+hrtDS.rpart_prune1.pred.in<- predict(hrtDS.rpart_prune1, type="class")
+table(data$heart_disease, hrtDS.rpart_prune1.pred.in, dnn=c("Truth","Predicted"))
+```
+Lets check out the criterians for model evaluation...
+
+**Missclassification rate | LOSS | AUC**
+
+```{r}
+#LOSS
+LOSS=(dt.insamplecost<-cost1(data$heart_disease,hrtDS.rpart_prune1.pred.in))
+#Misclassification rate
+MCR=(dt.insampleMCR<-mean(data$heart_disease!=hrtDS.rpart_prune1.pred.in))
+#roc curve | AUC
+hrtDS.rpart_prune1.pred.in_roc<- predict(hrtDS.rpart_prune1, type="prob")[,2]
+pred <- prediction(hrtDS.rpart_prune1.pred.in_roc,data$heart_disease)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+#vectorized output
+dt.rslt.in<-c(LOSS,MCR,AUC)
+dt.rslt.in
+```
+
+**Out of sample Prediction**
+```{r}
+hrtDS.rpart_prune1.pred.out<- predict(hrtDS.rpart_prune1,data_test, type="class")
+table(data_test$heart_disease, hrtDS.rpart_prune1.pred.out, dnn=c("Truth","Predicted"))
+```
+**Missclassification rate | LOSS | AUC**
+
+```{r}
+#LOSS
+LOSS=(dt.outsamplecost<-cost1(data_test$heart_disease,hrtDS.rpart_prune1.pred.out))
+#Misclassification rate
+MCR=(dt.outsampleMCR<-mean(data_test$heart_disease!=hrtDS.rpart_prune1.pred.out))
+
+#roc curve | AUC
+hrtDS.rpart_prune1.pred.out_roc<- predict(hrtDS.rpart_prune1,data_test, type="prob")[,2]
+pred <- prediction(hrtDS.rpart_prune1.pred.out_roc,as.numeric(data_test$heart_disease))
+perf.dt1 <- performance(pred, "tpr", "fpr")
+plot(perf.dt1, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+#vectorized output
+dt.rslt.out<-c(LOSS,MCR,AUC)
+dt.rslt.out
+```
+```{r}
+eval<-data.frame(rbind(dt.rslt.in,dt.rslt.out),
+                 row.names=c('DT: in','DT: out'))
+colnames(eval) <- c("COST", "MCR","AUC")
+
+kable(eval)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+```
+### 6.3 GAM: 
+
+#### 6.3.1 Modelling
+
+```{r}
+#fetch numeric columns
+numcols<-select_if(data_orig, is.numeric)
+#fetch character columns
+charcols<-select_if(data_orig, is.factor)
+
+#continious columns names
+(n<-colnames(numcols)[1:5])
+#character columns names
+colnames(charcols)
+
+```
+
+```{r}
+#continious columns names
+cont<-colnames(numcols)
+#character columns names
+n <- names(data)
+
+formula.gam <- as.formula(paste("heart_disease ~s(age)+s(trestbps)+s(chol) +s(thalach) +s(oldpeak) +", 
+                      paste(n[!n %in% cont], collapse = " + ")))
+formula.gam
+hrtDS.gam <- gam(formula = formula.gam, family=binomial,data=data);
+summary(hrtDS.gam)
+```
+```{r}
+plot(hrtDS.gam, shade=TRUE,seWithMean=TRUE,scale=0, pages = 1)
+```
+```{r}
+AIC(hrtDS.gam)
+BIC(hrtDS.gam)
+hrtDS.gam$deviance
+```
+We can notice that even the continious variables in the data do not have a non-linear distribution. This is backed up by the above plots where we can see a straight line
+
+#### 6.3.2 Model Assessment
+
+**Insample Performance**
+```{r}
+pcut.gam <- .20
+prob.gam.in<-predict(hrtDS.gam,type="response")
+pred.gam.in.class<-(prob.gam.in>=pcut.gam)*1
+table(data$heart_disease,pred.gam.in.class,dnn=c("Observed","Predicted"))
+```
+
+
+Lets check out the criterians for model evaluation...
+
+**Missclassification rate | LOSS | AUC**
+
+```{r}
+#LOSS
+LOSS=(gam.insamplecost<-cost1(data$heart_disease,pred.gam.in.class))
+#Misclassification rate
+MCR=(dt.insampleMCR<-mean(data$heart_disease!=pred.gam.in.class))
+
+#roc curve | AUC
+pred.gam.class.in_roc<- predict(hrtDS.gam, type="prob")[,2]
+pred <- prediction(as.numeric(pred.gam.class.in_roc),as.numeric(data$heart_disease))
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+#vectorized output
+gam.rslt.in<-c(LOSS,MCR,AUC)
+gam.rslt.in
+```
+
+**Out of sample Prediction**
+```{r}
+prob.gam.out<-predict(hrtDS.gam,data_test,type="response")
+pred.gam.out.class<-(prob.gam.out>=pcut.gam)*1
+table(data_test$heart_disease,pred.gam.out.class,dnn=c("Observed","Predicted"))
+```
+
+**Missclassification rate | LOSS | AUC**
+
+```{r}
+#LOSS
+LOSS=(dt.outsamplecost<-cost1(data_test$heart_disease,pred.gam.out.class))
+#Misclassification rate
+MCR=(dt.outsampleMCR<-mean(data_test$heart_disease!=pred.gam.out.class))
+
+#roc curve | AUC
+hrtDS.gam.out_roc<- predict(hrtDS.rpart_prune1,data_test, type="prob")[,2]
+pred <- prediction(as.numeric(hrtDS.gam.out_roc),as.numeric(data_test$heart_disease))
+perf.gm <- performance(pred, "tpr", "fpr")
+plot(perf.gm, colorize=TRUE)
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+#vectorized output
+gam.rslt.out<-c(LOSS,MCR,AUC)
+gam.rslt.out
+```
+```{r}
+eval<-data.frame(rbind(gam.rslt.in,gam.rslt.out),
+                 row.names=c('GAM: in','GAM: out'))
+colnames(eval) <- c("COST", "MCR","AUC")
+
+kable(eval)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+
+```
+
+
+### 6.4 Ensemble Methods
+
+
+Advanced Tree Models Bagging, Random Forests, and Boosting
+
+#### 6.4.1 Bagging
+
+Bagging stands for Bootstrap and Aggregating. It employs the idea of bootstrap but the purpose is not to study bias and standard errors of estimates. Instead, the goal of Bagging is to improve prediction accuracy. It fits a tree for each bootsrap sample, and then aggregate the predicted values from all these different trees. For more details, you may look at Wikepedia, or you can find the original paper Leo Breiman (1996).
+
+**To my best knowledge, it seems that bagging() won’t take an argument for asymmetric loss. Therefore, the classification results might not be appropriate.Lets check it out...**
+
+
+
+**Modelling** 
+
+```{r}
+heart.bag<- randomForest(as.factor(heart_disease)~.,mtry=ncol(data)-1, data = data, nbagg=100)
+```
+
+**Insample**
+
+```{r}
+heart.bag.pred<- predict(heart.bag, type="prob")[,2]
+pred.bag = prediction(heart.bag.pred, data$heart_disease)
+perf = performance(pred.bag, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred.bag, "auc"), "y.values"))
+
+```
+**Insample Analysis**
+
+```{r}
+heart.bag.pred<- predict(heart.bag, newdata = data, type="class")
+table(data$heart_disease, heart.bag.pred, dnn = c("True", "Pred"))
+```
+
+```{r}
+#LOSS
+LOSS<-cost0(data$heart_disease,heart.bag.pred)
+#Misclassification rate
+MCR<-mean(data$heart_disease!=heart.bag.pred)
+#Get the AUC
+AUC=unlist(slot(performance(pred.bag, "auc"), "y.values"))
+
+rslt.bag.in<-c(LOSS,MCR,AUC)
+rslt.bag.in
+```
+
+
+**Out of sample**
+
+```{r}
+
+levels(data_test$thal) <- levels(data$thal)
+levels(data_test$ca) <- levels(data$ca)
+levels(data_test$slope) <- levels(data$slope)
+levels(data_test$exang) <- levels(data$exang)
+levels(data_test$restecg) <- levels(data$restecg)
+levels(data_test$fbs) <- levels(data$fbs)
+levels(data_test$cp) <- levels(data$cp)
+levels(data_test$sex) <- levels(data$sex)
+
+data_test$heart_disease <-as.factor(data_test$heart_disease)
+heart.bag.pred.test<- predict(heart.bag, newdata = data_test, type="prob")[,2]
+pred.bag.out = prediction(heart.bag.pred.test, data_test$heart_disease)
+perf.bg = performance(pred.bag.out, "tpr", "fpr")
+plot(perf.bg, colorize=TRUE)
+unlist(slot(performance(pred.bag.out, "auc"), "y.values"))
+
+```
+
+
+
+```{r}
+heart.bag.pred.test<- predict(heart.bag, newdata = data_test, type="class")
+table(data_test$heart_disease, heart.bag.pred.test, dnn = c("True", "Pred"))
+```
+```{r}
+#LOSS
+LOSS<-cost0(data_test$heart_disease,heart.bag.pred.test)
+#Misclassification rate
+MCR<-mean(data_test$heart_disease!=heart.bag.pred.test)
+#Get the AUC
+AUC=unlist(slot(performance(pred.bag.out, "auc"), "y.values"))
+
+rslt.bag.out<-c(LOSS,MCR,AUC)
+rslt.bag.out
+```
+```{r}
+eval<-data.frame(rbind(rslt.bag.in,rslt.bag.out),
+                 row.names=c('BAG: in','BAG: out'))
+colnames(eval) <- c("COST", "MCR","AUC")
+
+kable(eval)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+```
+
+
+#### 6.4.1 Random Forest
+
+**Modelling**
+
+```{r}
+heart.rf<- randomForest(as.factor(heart_disease)~., mtry=sqrt(ncol(data)-1),ntree=100 ,data = data, importance=TRUE)
+heart.rf
+```
+
+**Variable Importance**
+
+```{r}
+heart.rf$importance
+```
+
+
+```{r}
+plot(heart.rf, lwd=rep(2, 3))
+legend("right", legend = c("OOB Error", "FPR", "FNR"), lwd=rep(2, 3), lty = c(1,2,3), col = c("black", "red", "green"))
+```
+**Optimal cutoff - Symmetric cost** 
+
+```{r}
+heart.rf.pred<- predict(heart.rf, type = "prob")[,2]
+
+p.seq = seq(0.01, 1, 0.01)
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+    cost[i] = costfunc(obs = data$heart_disease, pred.p = heart.rf.pred, pcut = p.seq[i])  
+}
+plot(p.seq, cost)
+optimal.pcut.sym= p.seq[which(cost==min(cost))][1]
+
+optimal.pcut.sym#0.62
+```
+**Insample Analysis**
+
+**ROC CURVE**
+```{r}
+pred.rf.in <- prediction(heart.rf.pred, data$heart_disease)
+perf <- performance(pred.rf.in, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred.rf.in, "auc"), "y.values"))
+
+```
+**Confusion Matrix**
+```{r}
+heart.rf.pred.c<- predict(heart.bag, newdata = data, type="class")
+table(data$heart_disease, heart.rf.pred.c, dnn = c("True", "Pred"))
+```
+
+**Out-of-Sample - Symmetric**
+
+```{r}
+## out-of-sample
+heart.rf.pred.test<- predict(heart.rf,newdata = data_test,type="prob")[,2]
+heart.rf.class.test<- (heart.rf.pred.test>optimal.pcut.sym)*1
+table(data_test$heart_disease, heart.rf.class.test, dnn = c("True", "Pred"))
+```
+
+```{r}
+pred.rf.out <- prediction(heart.rf.pred.test, data_test$heart_disease)
+perf <- performance(pred.rf.out, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+unlist(slot(performance(pred.rf.out, "auc"), "y.values"))
+```
+
+```{r}
+#LOSS
+LOSS<-cost0(data_test$heart_disease,heart.rf.class.test)
+#Misclassification rate
+MCR<-mean(data_test$heart_disease!=heart.rf.class.test)
+#Get the AUC
+AUC=unlist(slot(performance(pred.rf.out, "auc"), "y.values"))
+
+rslt.rf.out.sym<-c(LOSS,MCR,AUC)
+rslt.rf.out.sym
+```
+
+**Optimal cutoff - Assymetric cost**
+
+```{r}
+
+p.seq = seq(0.01, 1, 0.01)
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+    cost[i] = costfuncasym(obs = data$heart_disease, pred.p = heart.rf.pred, pcut = p.seq[i])  
+}
+plot(p.seq, cost)
+optimal.pcut.asym= p.seq[which(cost==min(cost))][1]
+
+optimal.pcut.asym#0.07
+```
+
+**Out-of-Sample Asymmetric**
+
+```{r}
+## out-of-sample
+heart.rf.pred.test<- predict(heart.rf,newdata = data_test,type="prob")[,2]
+heart.rf.class.test<- (heart.rf.pred.test>optimal.pcut.asym)*1
+table(data_test$heart_disease, heart.rf.class.test, dnn = c("True", "Pred"))
+```
+
+
+```{r}
+pred.rf.out <- prediction(heart.rf.pred.test, data_test$heart_disease)
+perf.rf <- performance(pred.rf.out, "tpr", "fpr")
+plot(perf.rf, colorize=TRUE)
+unlist(slot(performance(pred.rf.out, "auc"), "y.values"))
+```
+
+```{r}
+#LOSS
+LOSS<-cost1(data_test$heart_disease,heart.rf.class.test)
+#Misclassification rate
+MCR<-mean(data_test$heart_disease!=heart.rf.class.test)
+#Get the AUC
+AUC=unlist(slot(performance(pred.rf.out, "auc"), "y.values"))
+
+rslt.rf.out.asym<-c(LOSS,MCR,AUC)
+rslt.rf.out.asym
+```
+```{r}
+
+eval<-data.frame(rbind(rslt.rf.out.sym,rslt.rf.out.asym),
+                 row.names=c('Random Forest: Symmetric : Out_sample',
+                             'Random Forest: Asymmetric : Out_sample'))
+colnames(eval) <- c("COST", "MCR","AUC")
+
+kable(eval)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+```
+
+
+
+
+
+
+
+#### 6.4.2 Boosting
+
+Boosting builds a number of small trees, and each time, the response is the residual from last tree. It is a sequential procedure. We use gbm package to build boosted trees.
+
+
+```{r}
+data$heart_disease= as.factor(data$heart_disease)
+
+heart.boost= boosting(heart_disease~., data = data, boos = T)
+
+```
+
+```{r}
+# Training AUC
+pred.heart.boost= predict(heart.boost, newdata = data)
+pred <- prediction(pred.heart.boost$prob[,2], data$heart_disease)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+```
+
+```{r}
+unlist(slot(performance(pred, "auc"), "y.values"))
+```
+
+**Boosting in sample**
+
+```{r}
+pred.heart.boost.train= predict(heart.boost, newdata = data)
+#LOSS
+LOSS<-cost0(data$heart_disease,as.numeric(pred.heart.boost.train$class))
+#Misclassification rate
+MCR<-mean(data$heart_disease!=as.numeric(pred.heart.boost.train$class))
+
+
+# Testing AUC
+pred <- prediction(pred.heart.boost.train$prob[,2], data$heart_disease)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+boost_in<-c(LOSS,MCR,AUC)
+boost_in
+```
+
+
+
+**Boosting out sample**
+
+```{r}
+pred.heart.boost.test= predict(heart.boost, newdata = data_test)
+#LOSS
+LOSS<-cost0(data_test$heart_disease,as.numeric(pred.heart.boost.test$class))
+#Misclassification rate
+MCR<-mean(data_test$heart_disease!=as.numeric(pred.heart.boost.test$class))
+
+
+# Testing AUC
+pred <- prediction(pred.heart.boost.test$prob[,2], data_test$heart_disease)
+perf.bo <- performance(pred, "tpr", "fpr")
+plot(perf.bo, colorize=TRUE)
+
+
+#Get the AUC
+AUC=unlist(slot(performance(pred, "auc"), "y.values"))
+
+boost_out<-c(LOSS,MCR,AUC)
+boost_out
+```
+
+```{r}
+
+
+eval<-data.frame(rbind(boost_in,boost_out),
+                 row.names=c('Boosting: In_sample',
+                             'Boosting: Out_sample'))
+colnames(eval) <- c("COST", "MCR","AUC")
+
+kable(eval)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+
+```
+
+
+----- NOT sure if we can calculate pcut here -------
+### 6.5 Neural Networks
+
+We ran a neural network model using “heart disease” as the output variable, and the remaining 13 variables as input variables. We trained the model using NeuralNetTools package, in which the size of the hidden layers are calculated internally.For classification problems with nnet you need to code the response to factor first
+
+```{r}
+library(e1071)
+library(nnet)
+library(NeuralNetTools)
+data_orig$heart_disease <- as.factor(data_orig$heart_disease)
+```
+
+Sampling Data into 70% and 30% Test
+```{r}
+set.seed(13263635)
+index <- sample(nrow(data_orig),nrow(data_orig)*0.7)
+hd_train <- data_orig[index,]
+hd_test <- data_orig[-index,]
+```
+
+Here, we’re using another library called NeuralNetTools in which the size of the hidden layers are calculated internally
+
+
+```{r include=FALSE}
+hd.nnet <- train(heart_disease~., data=hd_train, method="nnet")
+```
+
+Evaluating the results:
+```{r}
+print(hd.nnet)
+```
+
+```{r, eval=FALSE}
+plot(hd.nnet)
+```
+
+```{r, fig.width=10, fig.height=5}
+PNN<-plot(garson(hd.nnet))
+PNN+coord_flip()
+```
+
+```{r, fig.width=8,fig.height=4}
+plotnet(hd.nnet$finalModel, y_names = "heart_disease") + title("Graphical Representation of Neural Network of Heart Disease ")
+```
+
+
+```{r}
+pred.glm.gtrain.nn <- predict(hd.nnet, type = "prob")[,2]
+pred.glm.gtest.nn <- predict(hd.nnet, newdata=hd_test,type = "prob")[,2]
+```
+
+
+```{r}
+cost_sym <- function(obs, pred.p, pcut){
+  weight1 = 1
+  weight0 = 1
+  c1 = (obs==1)&(pred.p<pcut)
+  c0 = (obs==0)&(pred.p>=pcut)
+  cost = (mean(weight1*c1+weight0*c0))
+  return(cost)
+}
+# define a sequence from 0.01 to 1 by 0.01
+p.seq = seq(0.01, 0.5, 0.01)
+
+# write a loop for all p-cut to see which one provides the smallest cost
+# first, need to define a 0 vector in order to save the value of cost from all pcut
+
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq)){ 
+    cost[i] = cost_sym(obs = hd_train$heart_disease, pred.p = pred.glm.gtrain.nn, pcut = p.seq[i])
+}
+
+#optimal pcut to be used further
+plot(p.seq, cost)
+optimal.pcut.sym = p.seq[which(cost == min(cost))]
+optimal.pcut.sym #0.5
+```
+
+Asymmetric : To find Optimal Pcut
+```{r}
+#Cost Function
+# define a cost function with input "obs" being observed response 
+# and "pi" being predicted probability, and "pcut" being the threshold.
+cost_asym <- function(obs, pred.p, pcut){
+  weight1 = 5
+  weight0 = 1
+  c1 = (obs==1)&(pred.p<pcut)  # count for "true=1 but pred=0"   (FN)
+  c0 = (obs==0)&(pred.p>=pcut) # count for "true=0 but pred=1"   (FP)
+  cost = (mean(weight1*c1+weight0*c0)) # misclassification with weight
+  return(cost)
+}
+# define a sequence from 0.01 to 1 by 0.01
+p.seq = seq(0.01, 0.5, 0.01)
+
+# write a loop for all p-cut to see which one provides the smallest cost
+# first, need to define a 0 vector in order to save the value of cost from all pcut
+cost = rep(0, length(p.seq))  
+for(i in 1:length(p.seq))
+  {cost[i] = cost_asym(obs = hd_train$heart_disease, 
+                      pred.p = pred.glm.gtrain.nn, 
+                      pcut = p.seq[i])}
+
+#optimal pcut to be used further
+plot(p.seq, cost)
+optimal.pcut = p.seq[which(cost==min(cost))]
+optimal.pcut = 0.36#0.36
+```
+
+Since the Asymmetrical Pcut is lower than symmetric cost, predictions are done using asymmetric cost
+
+#### 6.5.1 Asymmetrical 
+
+Train & Test Predictions - Asymm
+```{r}
+
+confusion_matrix_train <- table(hd_train$heart_disease, pred.glm.gtrain.nn)
+confusion_matrix_test <- table(hd_test$heart_disease, pred.glm.gtest.nn)
+
+misclassification_rate_train <- round((confusion_matrix_train[2]+confusion_matrix_train[3])/sum(confusion_matrix_train), 2)
+misclassification_rate_test <- round((confusion_matrix_test[2]+confusion_matrix_test[3])/sum(confusion_matrix_test), 2)
+
+cat("train misclassfication rate:", misclassification_rate_train, "| test misclassfication rate:", misclassification_rate_test)
+# Train MCR = 0.13
+# Test MCR = 0.33
+```
+
+```{r}
+confusion_matrix_train
+```
+
+```{r}
+confusion_matrix_test
+```
+
+ROC Curve for Train set
+
+```{r}
+#In sample roc
+prednn_roc.train<- predict(hd.nnet, type="prob")[,2]
+pred <- prediction(prednn_roc.train,hd_train$heart_disease)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize=TRUE)
+auc.train=unlist(slot(performance(pred, "auc"), "y.values"))
+auc.train
+```
+
+ROC Curve for Test set
+```{r}
+#Out of sample roc
+prednn_roc.test <- predict(hd.nnet, newdata=hd_test,type = "prob")[,2]
+pred.test.nn <- prediction(prednn_roc.test,hd_test$heart_disease)
+perf.nn <- performance(pred.test.nn, "tpr", "fpr")
+plot(perf.nn, colorize=TRUE)
+auc.test=unlist(slot(performance(pred.test.nn, "auc"), "y.values"))
+auc.test
+```
+
+
+Evaluation Function for asymmetric cost
+```{r}
+#Aymmetric cost evaluation function 
+cost_asym <- function(r, pi){
+  weight1 = 5
+  weight0 = 1
+  c1 = (r==1)&(pi==0) #logical vector - true if actual 1 but predict 0
+  c0 = (r==0)&(pi==1) #logical vector - true if actual 0 but predict 1
+  return(mean(weight1*c1+weight0*c0))
+}
+
+```
+
+Asymmetric Cost : Train and Test
+```{r}
+class.pred.train.nn <- (pred.glm.gtrain.nn>optimal.pcut)*1
+cost.train <- round(cost_asym(r = hd_train$heart_disease, pi = class.pred.train.nn),2)
+
+class.pred.test.nn<- (pred.glm.gtest.nn>optimal.pcut)*1
+cost.test <- round(cost_asym(r = hd_test$heart_disease, pi = class.pred.test.nn),2)
+
+cat("total train cost:", cost.train, "| total test cost:", cost.test)
+#Train Cost = 0.17
+# Test Cost = 0.29
+```
+
+```{r}
+nn.train.results <- c(cost.train,misclassification_rate_train,auc.train)
+nn.test.results <- c(cost.test,misclassification_rate_test,auc.test)
+```
+
+#### 6.5.2 Neural Net Result
+```{r}
+eval_nn <- data.frame(rbind(nn.train.results,nn.test.results),
+                 row.names=c('Neural Network : in','Neural Network : out'))
+colnames(eval_nn) <- c("COST", "MCR", "AUC")
+
+kable(eval_nn)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+```
+
+
+### 6.6 Unsupervised Learning
+
+#### 6.6.1 K-means
+
+```{r}
+numcols<-select_if(data, is.numeric)
+uns_df <- scale(numcols)
+distance <- get_dist(uns_df)
+
+```
+```{r}
+fviz_dist(distance, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+
+```
+```{r}
+k2 <- kmeans(uns_df, 
+             center = 2,
+             nstart = 25  )
+#table(k2$cluster, dnn=("Clusters"))
+k2
+```
+Cluster means for each attribute is depicted in summary
+
+**Visualization of Clusters**
+
+*Plotiing Cluster using fviz_cluster*
+
+```{r}
+fviz_cluster(k2, data = uns_df)
+```
+
+**Varying Visualizations by size**
+```{r}
+# k2
+k3 <- kmeans(uns_df, centers = 3, nstart = 25)
+k4 <- kmeans(uns_df, centers = 4, nstart = 25)
+k5 <- kmeans(uns_df, centers = 5, nstart = 25)
+
+p1 <- fviz_cluster(k2, geom = "point", data = uns_df)+
+  ggtitle("k = 2")
+p2 <- fviz_cluster(k3, geom = "point", data = uns_df)+
+  ggtitle("k = 3")
+p3 <- fviz_cluster(k4, geom = "point", data = uns_df)+
+  ggtitle("k = 4")
+p4 <- fviz_cluster(k5, geom = "point", data = uns_df)+
+  ggtitle("k = 5")
+
+library(gridExtra)
+grid.arrange(p1,p2,p3,p4, nrow = 2)
+```
+Although this visual assessment tells us where true dilineations occur (or do not occur such as clusters 2 & 4 in the k = 5 graph) between clusters, it does not tell us what the optimal number of clusters is.
+
+**Determining Optimal Clusters**
+
+As you may recall the analyst specifies the number of clusters to use; preferably the analyst would like to use the optimal number of clusters. To aid the analyst, the following explains the three most popular methods for determining the optimal clusters, which includes:
+
+*Elbow method
+*Silhouette method
+*Gap statistic
+
+##### (A) Elbow Method
+```{r}
+#finding optimal number of clusters
+set.seed(13263635)
+fviz_nbclust(uns_df, kmeans, method = "wss")
+```
+##### (B) Silhouette Method
+```{r}
+#finding optimal number of clusters
+set.seed(13263635)
+fviz_nbclust(uns_df, kmeans, method = "silhouette")
+```
+##### (C) Compute gap statistic
+
+```{r}
+# compute gap statistic
+set.seed(13263635)
+gap_stat <- clusGap(uns_df, FUN = kmeans, nstart = 25,
+                    K.max = 10, B = 50)
+```
+
+```{r}
+# Print the result
+print(gap_stat, method = "firstmax")
+#visualize
+fviz_gap_stat(gap_stat)
+```
+
+**We choose k=2**
+As most algorithms suggested the same, Hence now we are assured to use 2 clusters. 
+```{r}
+k2
+
+```
+
+```{r}
+#changed
+datakmClustered<-data %>% 
+  mutate(Cluster = k2$cluster-1)
+#2 is 1 and 1 is 0
+
+#table(datakmClustered$heart_disease,datakmClustered$Cluster, dnn = c("ture","clustered"))
+mcr<-mean(datakmClustered$heart_disease!=(datakmClustered$Cluster))
+
+```
+
+```{r}
+outkmeans<-numcols %>% 
+  mutate(Cluster = k2$cluster) %>% 
+  group_by(Cluster) %>% 
+  summarise_all("mean")
+
+kable(outkmeans)  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                font_size = 12, position = "left", full_width = FALSE)
+
+```
+**Interpretation**
+The mean of all predictors(continious) appear to be different for both the clusters created.
+
+#### 6.6.2 Hierachical Clustering
+
+Here we have implementd hierachical clustering for categorical & continious variables
+
+The clustering process itself contains 3 distinctive steps:
+
+*Calculating dissimilarity matrix - is arguably the most important decision in clustering, and all your further steps are going to be based on the dissimilarity matrix you've made.
+*Choosing the clustering method
+*Assessing clusters
+
+
+Data types differences are important as dissimilarity matrix is based on distances between individual data points. While it is quite easy to imagine distances between numerical data points (Eucledian distances), categorical data (factors in R) does not seem as obvious.
+In order to calculate a dissimilarity matrix in this case, you would go for something called Gower distance
+
+```{r}
+tree <- hclustvar(numcols, catcols)
+```
+
+
+```{r}
+plot(tree, cex = 0.6)
+#rect.hclust(tree, k = 4, border = 2:4)
+```
+
+**Stablity check using bootstraping**
+
+Evaluates the stability of partitions obtained from a hierarchy of p variables. This hierarchy is performed with hclustvar and the stability of the partitions of 2 to p-1 clusters is evaluated with a bootstrap approach. The boostrap approch is the following: hclustvar is applied to B boostrap samples of the n rows. The partitions of 2 to p-1 clusters obtained from the B bootstrap hierarchies are compared with the partitions from the initial hierarchy . The mean of the corrected Rand indices is plotted according to the number of clusters. This graphical representation helps in the determination of a suitable numbers of clusters
+
+```{r}
+stab <- stability(tree, B=50) # "B=50" refers to the number of bootstrap samples to use in the estimation.
+```
+**Intrepretation**
+This proves that 2 given us the best number of clusters
+
+**Using Dissimilarity matrix**
+
+"Gower's distance" is chosen by metric "gower" or automatically if some columns of x are not numeric. Also known as Gower's coefficient (1971), expressed as a dissimilarity, this implies that a particular standardisation will be applied to each variable, and the "distance" between two units is the sum of all the variable-specific distances
+```{r}
+d <- daisy(data[,-14], metric="gower")
+fit <- hclust(d=d, method="ward.D")    # Also try: method="ward.D"
+# Cut tree into 4 groups
+sub_grp <- cutree(fit, k = 2)
+# Number of members in each cluster
+table(sub_grp)
+```
+
+
+```{r}
+plot(fit, cex = 0.6)
+rect.hclust(fit, k = 2, border = 2:4)
+
+```
+Adding the clusters to our traing data
+```{r}
+HCdata<-data %>%
+  mutate(HCcluster = sub_grp)
+```
+Misclassification calculation
+```{r}
+HCdata$HCcluster[HCdata$HCcluster==2] <- 0
+#table(HCdata$heart_disease,HCdata$HCcluster, dnn = c("ture","clustered"))
+mcr<-mean(HCdata$heart_disease!=HCdata$HCcluster)
+```
+#### 6.6.3 PCA
+
+Model the numeric columns to PCA model, 
+It is always performed on a symmetric correlation or covariance matrix. This means the matrix should be numeric and have standardized data.
+```{r}
+datapca<-data[,1:13]
+dt<-dummy.data.frame(datapca)
+colnames(dt)
+```
+
+```{r}
+pca <- prcomp(dt, scale = TRUE) 
+pca
+```
+```{r}
+pcaCharts <- function(x) {
+    x.var <- x$sdev ^ 2
+    x.pvar <- x.var/sum(x.var)
+    print("proportions of variance:")
+    print(x.pvar)
+    
+    par(mfrow=c(2,2))
+    plot(x.pvar,xlab="Principal component", ylab="Proportion of variance explained", ylim=c(0,1), type='b')
+    plot(cumsum(x.pvar),xlab="Principal component", ylab="Cumulative Proportion of variance explained", ylim=c(0,1), type='b')
+    screeplot(x)
+    screeplot(x,type="l")
+    par(mfrow=c(1,1))
+}
+```
+
+```{r}
+summ<-summary(pca)
+summ
+fviz_screeplot(pca)
+#pcaCharts(pca)
+
+```
+**Inference: Top 20 predictors can explain more than 98% of variance**
+```{r}
+pcavar<-pca$sdev^2
+pcasd<-pca$sdev
+```
+**check variance of first 20 components as per sumary**
+```{r}
+#pcavar[1:20]
+prop_varex <- pcavar/sum(pcavar)
+prop_varex[1:20]
+```
+```{r}
+#scree plot
+plot(prop_varex, xlab = "Principal Component",
+             ylab = "Proportion of Variance Explained",
+             type = "b")
+
+#cumulative scree plot
+plot(cumsum(prop_varex), xlab = "Principal Component",
+              ylab = "Cumulative Proportion of Variance Explained",
+              type = "b")
+```
+
+Hence , we can se that out of 31 predictors(hot encoded)predictors 21 predictors contribute to 98% of variance
+**proportion of variance explained**
+```{r}
+fviz_pca(pca)
+#biplot(pca,scale=0, cex=.7)
+```
+```{r}
+pca.out <- pca
+pca.out$rotation <- -pca.out$rotation
+pca.out$x <- -pca.out$x
+fviz_pca(pca.out)
+```
+
+```{r}
+impPredictors<-rownames(data.frame(pca$rotation))[1:20]
+notsoimp<-rownames(data.frame(pca$rotation))[21:29]
+#[1:21]
+```
+
+```{r}
+s_df <- apply(dt, 2, scale)
+head(s_df)
+```
+```{r}
+cov_df <- cov(s_df) #covariance metric 
+cov_df
+```
+```{r}
+ei_df <- eigen(cov_df)
+ei_df
+
+```
+```{r}
+str(ei_df)
+```
+
+```{r}
+ei_df$vectors[,1:21]
+```
+
+```{r}
+p <- ei_df$vectors[,1:21]
+p <- -p
+p
+```
+```{r}
+# explainable variance ratio
+avo <- ei_df$values / sum(ei_df$values)
+round(avo, 4)
+```
+```{r}
+sum(avo[1:31])
+```
+## 7.0 Conclusion:
+
+**Composite Roc curve of all models**
+```{r}
+
+pred <- prediction(pred.heart.boost.test$prob[,2], data_test$heart_disease)
+perf.bo <- performance(pred, "tpr", "fpr")
+plot(perf.bo, col = "red")
+plot(perf.bg,add = TRUE, col = "pink")
+plot(perf.rf, add = TRUE,col = "cyan")
+plot(perf.l, add = TRUE, col = "black")
+plot(perf.dt1, add = TRUE, col = "blue")
+plot(perf.gm, add = TRUE,col = "green")
+plot(perf.nn, add = TRUE,col = "grey")
+
+## Add Legend
+legend("bottomright", c("Boosting", "Bagging","RandomFrst","Logistic","Dtrees","Gam","NN"), lty=1, 
+    col = c("red", "pink","cyan","black","blue","green","grey"), bty="n")
+```
+
+Considering Miss Classification as most important metric we select Boosting model as it has least Miss classification rate and cost, AUC is also higher than most algorithms although Random forest and Bagging are slightly better than Boosting in this regard 
+
+When it comes to diagnosing heart disease, we want to make sure we don't have too many false-positives (you don't have heart disease, but told you do and get treatment) or false-negatives (you have heart disease, but told you don't and don't get treatment). Therefore, model with highest accuracy and lowest miss classification rate is chosen as the best of all.
+*Bagging in this case also performs well on the in-sample data, although the misclassification rate is slightly lower than Boosting.
+
+*Random Forest on the other hand performs more moderately in in-sample but doesn't perform similarly on out of sample. Increasing the cost (Asymmetric loss).
+
+*One important thing to notice here is that Ensemble methods do not have a way to prescribe a Asymmetric cost function while creating the Tree, as in the case of CART(rpart) hence they might not perform well is the data as a asymmetric cost associated to it.
+
+*Decision Trees here take a humble approach, performing well in in-sample and out of sample. Their cost and Misclassification rate is lower than GAM and classic Logistic model. 
+
+*The neural network (with 3 hidden layers) has the best in-sample mcr amongst all the models considered but they have a highest loss on Out of sample data. 
+
+Evaluating all these factors we select Boosting as best performing model among all other Supervised Learning approaches that we examined in this dataset.
+
+## 8.0 Appendix
+
+**6.6Support Vector Machine (SVM)**
+
+
+```{r}
+library(e1071)
+heart.svm = svm(heart_disease ~ ., data = data, cost = 1, gamma = 1/length(data), probability= TRUE)
+prob.svm = predict(heart.svm, data_test, probability = TRUE)
+prob.svm = attr(prob.svm, 'probabilities')[,2] #This is needed because prob.svm gives a matrix
+pred.svm = as.numeric((prob.svm >= 0.2))
+table(data_test$heart_disease,pred.svm,dnn=c("Obs","Pred"))
+```
+```{r}
+mean(ifelse(data_test$heart_disease != pred.svm, 1, 0))
+```
+
+```{r}
+cost1(data_test$heart_disease, pred.svm)
+```
+
